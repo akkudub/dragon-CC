@@ -3,8 +3,6 @@ import pylru
 import argparse
 import math
 
-word_size = 2
-
 # Arguments
 parser = argparse.ArgumentParser(description='Cache Simulator')
 parser.add_argument('protocol', type=str)
@@ -22,19 +20,13 @@ instruction_count = []
 bus_traffic = 0
 
 sets_count = int(math.ceil(args.cache_size / (args.associativity * args.block_size)))
-stalls = []
-stalled_instruction = []
+stalled_instructions = []
 caches = []
 fs = []
 readers = []
 done = []
 bus_mutex = -1
-
-def is_everyone_stalled():
-    for i in range(0, args.processor_count):
-        if stalls[i] == 0:
-            return False
-    return True
+word_size = 2
 
 def get_state(cpu, address):
     block_num = int(math.floor(address / args.block_size))
@@ -43,26 +35,46 @@ def get_state(cpu, address):
         return "I"
     else:
         return caches[cpu][set_num][block_num]
-    
+
 def set_state(cpu, address, state):
     block_num = int(math.floor(address / args.block_size))
     set_num = block_num % sets_count
     
-    if state == "I" and get_state(cpu, address) != "I":
-        del caches[cpu][set_num][block_num]
+    if state == "I":
+        if get_state(cpu, address) != "I":
+            del caches[cpu][set_num][block_num]
     else:
         caches[cpu][set_num][block_num] = state
+
+def is_all_stalled():
+    for i in range(0, args.processor_count):
+        if len(stalled_instructions[i]) == 0:
+            return False
+    return True
+
+def get_flusher(address):
+    for i in range(0, args.processor_count):
+        for j in range(0, len(stalled_instructions[i])):
+            if stalled_instructions[i][j]['instruction'] == 4 and stalled_instructions[i][j]['address'] == address:
+                return i
+    return -1
 
 def shared_signal(address):
     for i in range(0, args.processor_count):
         if get_state(i, address) != "I":
             return True
     return False
-
+    
 def make_eviction_handler(cpu, set):
-    def eviction(key, value):
-        pass
-        #print(str(key) + " evicted from cpu " + str(cpu) + " cache!")
+    def eviction(block_num, state):
+        #print(str(block_num) + " evicted from cpu " + str(cpu) + " cache !")
+        if state == "M":
+            bus_traffic += args.block_size
+            stalled_instructions[cpu].append({
+                'stalls': 100,
+                'instruction': 4,
+                'address': block_num * args.block_size
+            })
     return eviction
 
 try:
@@ -70,18 +82,16 @@ try:
     for i in range(0, args.processor_count):
         filename = args.input_file + str(i+1) + '.PRG'
         fs.append(open(filename, 'rb'))
-        stalls.append(0)
+        
         cycles.append(0)
         misses.append(0)
         instruction_count.append(0)
-        
-        stalled_instruction.append(False)
+        stalled_instructions.append([])
         done.append(False)
         
         cache = []
         for j in range(0, sets_count):
-            #cache.append(pylru.lrucache(args.associativity, make_eviction_handler(i, j)))
-            cache.append(pylru.lrucache(args.associativity))
+            cache.append(pylru.lrucache(args.associativity, make_eviction_handler(i, j)))
         caches.append(cache)
     for f in fs:
         readers.append(csv.reader(f, delimiter=' '))
@@ -91,28 +101,29 @@ try:
     all_done = False
     while not all_done:
         for i in range(0, args.processor_count):
-            cycles[i] += 1
-            
-            if stalls[i] > 0:
+            if len(stalled_instructions[i]) > 0:
+                cycles[i] += 1
+                
                 #try acquire the shared bus
                 if bus_mutex == i or bus_mutex == -1:
                     #acquire the bus
                     bus_mutex = i
                     
-                    if is_everyone_stalled():
+                    if is_all_stalled():
                         #print("everyone is stalled")
-                        cycles[i] += stalls[i] - 1
+                        cycles[i] += stalled_instructions[i][0]['stalls'] - 1
                         for j in range(0, args.processor_count):
                             if i == j:
                                 continue
-                            cycles[j] += stalls[i]
-                        stalls[i] = 0
+                            cycles[j] += stalled_instructions[i][0]['stalls']
+                        stalled_instructions[i][0]['stalls'] = 0
                     else:
-                        stalls[i] -= 1
+                        stalled_instructions[i][0]['stalls'] -= 1
                     
-                    if stalls[i] == 0:
+                    if stalled_instructions[i][0]['stalls'] == 0:
                         bus_mutex = -1
-                        instruction, address = stalled_instruction[i]
+                        instruction = stalled_instructions[i][0]['instruction']
+                        address = stalled_instructions[i][0]['address']
                         if instruction == 0:
                             pass
                         elif instruction == 2:
@@ -124,6 +135,7 @@ try:
                             set_state(i, address, 'M')
                         elif instruction == 4:
                             set_state(i, address, 'I')
+                        stalled_instructions[i].pop(0)
                 continue
             
             row = None
@@ -138,6 +150,8 @@ try:
                     if done[j] == False:
                         all_done = False
                 continue
+                
+            cycles[i] += 1
             
             # 0 = fetch
             # 2 = read
@@ -157,16 +171,19 @@ try:
                 state = get_state(i, address)
                 
                 if state == "M":
-                    pass
+                    set_state(i, address, 'M')
                 elif state == "E":
-                    pass
+                    set_state(i, address, 'E')
                 elif state == "S":
-                    pass
+                    set_state(i, address, 'S')
                 elif state == "I":
                     misses[i] += 1
-                    stalls[i] += 100
-                    bus_traffic += word_size
-                    stalled_instruction[i] = (instruction, address)
+                    bus_traffic += args.block_size
+                    stalled_instructions[i].append({
+                        'stalls': 100,
+                        'instruction': instruction,
+                        'address': address
+                    })
             elif instruction == 3:
                 state = get_state(i, address)
                 
@@ -175,33 +192,44 @@ try:
                 elif state == "E":
                     set_state(i, address, 'M')
                 elif state == "S":
-                    flusher = -1
+                    flusher = get_flusher(address)
                     for j in range(0, args.processor_count):
                         other_state = get_state(j, address)
                         if other_state == "S":
                             if flusher == -1:
                                 flusher = j
-                                stalls[j] += 100
-                                stalled_instruction[j] = (4, address)
+                                bus_traffic += args.block_size
+                                stalled_instructions[j].append({
+                                    'stalls': 100,
+                                    'instruction': 4,
+                                    'address': address
+                                })
                             else:
                                 set_state(j, address, 'I')
                     set_state(i, address, 'M')
                 elif state == "I":
                     if shared_signal(address):
-                        flusher = -1
+                        flusher = get_flusher(address)
                         for j in range(0, args.processor_count):
                             other_state = get_state(j, address)
                             if other_state != "I":
                                 if flusher == -1:
                                     flusher = j
-                                    stalls[j] += 100
-                                    stalled_instruction[j] = (4, address)
+                                    bus_traffic += args.block_size
+                                    stalled_instructions[j].append({
+                                        'stalls': 100,
+                                        'instruction': 4,
+                                        'address': address
+                                    })
                                 else:
                                     set_state(j, address, 'I')
                     misses[i] += 1
-                    stalls[i] += 100
-                    bus_traffic += word_size
-                    stalled_instruction[i] = (instruction, address)
+                    bus_traffic += args.block_size
+                    stalled_instructions[i].append({
+                        'stalls': 100,
+                        'instruction': instruction,
+                        'address': address
+                    })
 finally:
     print("Done!")
     print("")

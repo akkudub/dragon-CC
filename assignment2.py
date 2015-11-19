@@ -29,6 +29,7 @@ CPU = []
 currBusSignal = ""
 currBusData = 0
 totalBusTraffic = 0
+busMutex = -1
 
 class Processor(object):
 
@@ -47,7 +48,7 @@ class Processor(object):
 		block = int(math.floor(address/block_size))
 		blockSet = block % cacheSets
 		if block in self.cache[blockSet]:
-			return self.cache[blockSet][block]
+			return self.cache[blockSet].peek(block)
 		else:
 			return "I"
 
@@ -60,6 +61,16 @@ class Processor(object):
 		else:
 			self.cache[blockSet][block] = state
 
+def make_eviction_handler(processor, set):
+    def eviction(block_num, state):
+        #print(str(block_num) + " evicted from cpu " + str(cpu) + " cache !")
+        if state == "M" or stae == "Sm":
+            totalBusTraffic += block_size
+            processor.stalls += 100
+            processor.stalled_instr = [4, -1]
+
+    return eviction
+
 try:
 	#initialising
 	for i in range(0, no_processors):
@@ -71,7 +82,7 @@ try:
 		traceFileReader = csv.reader(tempFile, delimiter=' ')
 		cache = []
 		for j in range(0, cacheSets):
-			cache.append(pylru.lrucache(associativity))
+			cache.append(pylru.lrucache(associativity, make_eviction_handler(i, j)))
 
 		CPU.append(Processor(i, traceFileReader, cache))
 
@@ -81,7 +92,8 @@ try:
 	while not all_done:
 		for core in CPU:
 			core.cycles += 1
-			if core.stalls = 0:
+			#if core is functioning normally
+			if core.stalls <= 0:
 				try:
 					nextMemAccess = core.trace.next()
 				except StopIteration:
@@ -107,13 +119,13 @@ try:
 				elif nextInstr == 2:
 					state = core.getState(nextAddr)
 					if state == "M":
-						pass
+						core.setState(nextAddr, "M")
 					if state == "E":
-						pass
+						core.setState(nextAddr, "E")
 					if state == "Sc":
-						pass
+						core.setState(nextAddr, "Sc")
 					if state == "Sm":
-						pass
+						core.setState(nextAddr, "Sm")
 					#PrRdMiss
 					if state == "I":
 						core.misses += 1
@@ -135,7 +147,7 @@ try:
 				elif nextInstr == 3:
 					state = core.getState(nextAddr)
 					if state == "M":
-						pass
+						core.setState(nextAddr, "M")
 					if state == "E":
 						core.setState(nextAddr, "M")
 					if state == "Sc":
@@ -161,6 +173,28 @@ try:
 							core.stalls += 100
 						else:
 							core.stalls += words_per_block
+
+			#if core has a stall
+			else:
+				#try to acquire bus 
+				if busMutex == -1 or busMutex == core.no:
+					#bus acquired
+					busMutex = core.no
+					core.stalls -= 1
+					if core.stalls == 0:
+						#do everything and release bus
+						busMutex = -1
+						stalledInstr = core.stalled_instr[0]
+						stalledAddr = core.stalled_instr[1]
+						#fetch instr
+						if stalledInstr == 0:
+							pass
+						#read
+						if stalledInstr == 2:
+
+						#write
+						if stalledInstr == 3:
+
 
 				#print no of instr?
 
